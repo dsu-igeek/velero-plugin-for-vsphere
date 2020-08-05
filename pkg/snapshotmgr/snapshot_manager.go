@@ -29,7 +29,6 @@ import (
 	"github.com/vmware-tanzu/astrolabe/pkg/astrolabe"
 	"github.com/vmware-tanzu/astrolabe/pkg/ivd"
 	astrolabe_pvc "github.com/vmware-tanzu/astrolabe/pkg/pvc"
-	"github.com/vmware-tanzu/astrolabe/pkg/s3repository"
 	"github.com/vmware-tanzu/astrolabe/pkg/server"
 	backupdriverv1 "github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/apis/backupdriver/v1"
 	v1api "github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/apis/veleroplugin/v1"
@@ -47,7 +46,7 @@ type SnapshotManager struct {
 	logrus.FieldLogger
 	config map[string]string
 	Pem    astrolabe.ProtectedEntityManager
-	s3PETM *s3repository.ProtectedEntityTypeManager
+	s3PETM astrolabe.ProtectedEntityTypeManager
 }
 
 // TODO - remove in favor of NewSnapshotManagerFromConfig when callers have been converted
@@ -114,7 +113,6 @@ func NewSnapshotManagerFromConfig(configInfo server.ConfigInfo, s3RepoParams map
 			logger.Infof("SnapshotManager: vSphere VC credential is retrieved")
 		}
 	}
-	var s3PETM *s3repository.ProtectedEntityTypeManager
 
 	// TODO: Remove the use of s3RepoParams. Do not use BackupStorageLocation,
 	//  as data movement will use BackupRepositories for each upload/download job
@@ -122,6 +120,17 @@ func NewSnapshotManagerFromConfig(configInfo server.ConfigInfo, s3RepoParams map
 	isLocalMode := utils.GetBool(config[utils.VolumeSnapshotterLocalMode], false)
 	initRemoteStorage := clusterFlavor == utils.VSphere
 
+
+	// Initialize the DirectProtectedEntityManager
+	dpem := server.NewDirectProtectedEntityManagerFromParamMap(configInfo, logger)
+
+	snapMgr := SnapshotManager{
+		FieldLogger: logger,
+		config:      config,
+		Pem:         dpem,
+		//s3PETM:      s3PETM,
+	}
+	logger.Infof("SnapshotManager is initialized with the configuration: %v", config)
 	// if so, check whether there is any specification about remote storage location in config
 	// otherwise, retrieve from velero BSLs.
 	if !isLocalMode && initRemoteStorage {
@@ -141,17 +150,17 @@ func NewSnapshotManagerFromConfig(configInfo server.ConfigInfo, s3RepoParams map
 
 		logger.Infof("SnapshotManager: Velero Backup Storage Location is retrieved, region=%v, bucket=%v", s3RepoParams["region"], s3RepoParams["bucket"])
 
-		s3PETM, err = utils.GetS3PETMFromParamsMap(s3RepoParams, logger)
+		intS3PETM, err := utils.GetS3PETMFromParamsMap(s3RepoParams, logger)
 		if err != nil {
 			logger.WithError(err).Errorf("Failed to get s3PETM from params map: region=%v, bucket=%v",
 				s3RepoParams["region"], s3RepoParams["bucket"])
 			return nil, err
 		}
+		// Wrapper the S3PETM to delegate copy/overwrite to data manager
+		snapMgr.s3PETM = NewDataManagerProtectedEntityTypeManager(intS3PETM, &snapMgr)
 		logger.Infof("SnapshotManager: Get s3PETM from the params map")
 	}
 
-	// Initialize the DirectProtectedEntityManager
-	dpem := server.NewDirectProtectedEntityManagerFromParamMap(configInfo, logger)
 
 	// Register external PETMs if any
 	if clusterFlavor == utils.TkgGuest {
@@ -168,15 +177,17 @@ func NewSnapshotManagerFromConfig(configInfo server.ConfigInfo, s3RepoParams map
 		dpem.RegisterExternalProtectedEntityTypeManagers([]astrolabe.ProtectedEntityTypeManager{paraVirtPETM})
 	}
 
-	snapMgr := SnapshotManager{
-		FieldLogger: logger,
-		config:      config,
-		Pem:         dpem,
-		s3PETM:      s3PETM,
+
+
+
+	ivdPETM := dpem.GetProtectedEntityTypeManager("ivd")
+	if ivdPETM != nil {
+		dmIVDPE := NewDataManagerProtectedEntityTypeManager(ivdPETM, &snapMgr)
+		// We use a DataManagerPE to delegate data copy to the data manager
+		dpem.RegisterExternalProtectedEntityTypeManagers([]astrolabe.ProtectedEntityTypeManager{dmIVDPE})
 	}
 
 	logger.Infof("SnapshotManager is initialized with the configuration: %v", config)
-
 	return &snapMgr, nil
 }
 
@@ -243,23 +254,36 @@ func (this *SnapshotManager) createSnapshot(peID astrolabe.ProtectedEntityID, ta
 		return updatedPeID, nil
 	}
 
+	_, err = this.UploadSnapshot(peID, updatedPeID, peSnapID, pe, ctx, backupRepositoryName)
+	if err != nil {
+		return astrolabe.ProtectedEntityID{}, err
+	}
+
+	return updatedPeID, nil
+}
+
+/*
+Creates an Upload CR
+ */
+func (this *SnapshotManager) UploadSnapshot(peID astrolabe.ProtectedEntityID, updatedPeID astrolabe.ProtectedEntityID,
+	peSnapID astrolabe.ProtectedEntitySnapshotID, pe astrolabe.ProtectedEntity, ctx context.Context, backupRepositoryName string) (*v1api.Upload, error) {
 	this.Info("Start creating Upload CR")
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		this.WithError(err).Errorf("Failed to get k8s inClusterConfig")
-		return updatedPeID, err
+		return nil, err
 	}
 	pluginClient, err := plugin_clientset.NewForConfig(config)
 	if err != nil {
 		this.WithError(err).Errorf("Failed to get k8s clientset from the given config: %v ", config)
-		return updatedPeID, err
+		return nil, err
 	}
 
 	// look up velero namespace from the env variable in container
 	veleroNs, exist := os.LookupEnv("VELERO_NAMESPACE")
 	if !exist {
 		this.WithError(err).Errorf("CreateSnapshot: Failed to lookup the env variable for velero namespace")
-		return updatedPeID, err
+		return nil, err
 	}
 
 	uploadBuilder := builder.ForUpload(veleroNs, "upload-"+peSnapID.GetID()).BackupTimestamp(time.Now()).NextRetryTimestamp(time.Now()).Phase(v1api.UploadPhaseNew)
@@ -267,10 +291,10 @@ func (this *SnapshotManager) createSnapshot(peID astrolabe.ProtectedEntityID, ta
 		components, err := pe.GetComponents(ctx)
 		if err != nil {
 			this.WithError(err).Errorf("Failed to retrive subcomponents for %s", peID.String())
-			return updatedPeID, err
+			return nil, err
 		}
 		if len(components) != 1 {
-			return updatedPeID, errors.New(fmt.Sprintf("Expected 1 component, %s has %d", peID.String(), len(components)))
+			return nil, errors.New(fmt.Sprintf("Expected 1 component, %s has %d", peID.String(), len(components)))
 		}
 		componentPEID := astrolabe.NewProtectedEntityIDWithSnapshotID(components[0].GetID().GetPeType(), components[0].GetID().GetID(), peSnapID)
 		uploadBuilder.SnapshotID(componentPEID.String())
@@ -282,13 +306,12 @@ func (this *SnapshotManager) createSnapshot(peID astrolabe.ProtectedEntityID, ta
 		uploadBuilder = uploadBuilder.BackupRepositoryName(backupRepositoryName)
 	}
 	upload := uploadBuilder.Result()
-	_, err = pluginClient.VeleropluginV1().Uploads(veleroNs).Create(upload)
+	retUpload, err := pluginClient.VeleropluginV1().Uploads(veleroNs).Create(upload)
 	if err != nil {
 		this.WithError(err).Errorf("CreateSnapshot: Failed to create Upload CR for PE %s", updatedPeID.String())
-		return updatedPeID, err
+		return nil, err
 	}
-
-	return updatedPeID, nil
+	return retUpload, nil
 }
 
 func (this *SnapshotManager) DeleteSnapshotWithBackupRepository(peID astrolabe.ProtectedEntityID, backupRepository string) error {

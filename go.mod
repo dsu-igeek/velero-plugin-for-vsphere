@@ -42,6 +42,6 @@ replace k8s.io/apimachinery => k8s.io/apimachinery v0.17.3
 
 replace k8s.io/client-go => k8s.io/client-go v0.17.3
 
-replace sigs.k8s.io/controller-tools => sigs.k8s.io/controller-tools v0.2.5
+replace github.com/vmware-tanzu/astrolabe => ../astrolabe
 
 go 1.13
