@@ -241,28 +241,28 @@ func TestRerieveVcConfigSecret(t *testing.T) {
 	logger.SetFormatter(formatter)
 	logger.SetLevel(logrus.DebugLevel)
 
-	tests := []struct{
-		name string
-		sEnc string
-		vc string
+	tests := []struct {
+		name     string
+		sEnc     string
+		vc       string
 		password string
 	}{
 		{
-			name: "Password with special character \\ in it",
-			sEnc : "[VirtualCenter \"sc-rdops-vm06-dhcp-184-231.eng.vmware.com\"]\npassword = \"GpI4G`OK'?in40Fo/0\\\\;\"",
-			vc: "sc-rdops-vm06-dhcp-184-231.eng.vmware.com",
+			name:     "Password with special character \\ in it",
+			sEnc:     "[VirtualCenter \"sc-rdops-vm06-dhcp-184-231.eng.vmware.com\"]\npassword = \"GpI4G`OK'?in40Fo/0\\\\;\"",
+			vc:       "sc-rdops-vm06-dhcp-184-231.eng.vmware.com",
 			password: "GpI4G`OK'?in40Fo/0\\;",
 		},
 		{
-			name: "Password with multiple = in it",
-			sEnc : "[VirtualCenter \"sc-rdops-vm06-dhcp-184-231.eng.vmware.com\"]\npassword = \"GpI4G`OK'?in40Fo/0\\\\;=h=\"",
-			vc: "sc-rdops-vm06-dhcp-184-231.eng.vmware.com",
+			name:     "Password with multiple = in it",
+			sEnc:     "[VirtualCenter \"sc-rdops-vm06-dhcp-184-231.eng.vmware.com\"]\npassword = \"GpI4G`OK'?in40Fo/0\\\\;=h=\"",
+			vc:       "sc-rdops-vm06-dhcp-184-231.eng.vmware.com",
 			password: "GpI4G`OK'?in40Fo/0\\;=h=",
 		},
 		{
-			name: "Password with special character \\t in it",
-			sEnc : "[VirtualCenter \"sc-rdops-vm06-dhcp-184-231.eng.vmware.com\"]\npassword = \"G4\\t4t\"",
-			vc: "sc-rdops-vm06-dhcp-184-231.eng.vmware.com",
+			name:     "Password with special character \\t in it",
+			sEnc:     "[VirtualCenter \"sc-rdops-vm06-dhcp-184-231.eng.vmware.com\"]\npassword = \"G4\\t4t\"",
+			vc:       "sc-rdops-vm06-dhcp-184-231.eng.vmware.com",
 			password: "G4\t4t",
 		},
 	}

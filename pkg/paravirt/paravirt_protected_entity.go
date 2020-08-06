@@ -119,7 +119,7 @@ func (this ParaVirtProtectedEntity) GetMetadataReader(ctx context.Context) (io.R
 	panic("implement me")
 }
 
-func (this ParaVirtProtectedEntity)Overwrite(ctx context.Context, sourcePE astrolabe.ProtectedEntity,
+func (this ParaVirtProtectedEntity) Overwrite(ctx context.Context, sourcePE astrolabe.ProtectedEntity,
 	params map[string]map[string]interface{}, overwriteComponents bool) error {
 	panic("implement me")
 }

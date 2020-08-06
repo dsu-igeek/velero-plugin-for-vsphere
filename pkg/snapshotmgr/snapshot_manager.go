@@ -120,7 +120,6 @@ func NewSnapshotManagerFromConfig(configInfo server.ConfigInfo, s3RepoParams map
 	isLocalMode := utils.GetBool(config[utils.VolumeSnapshotterLocalMode], false)
 	initRemoteStorage := clusterFlavor == utils.VSphere
 
-
 	// Initialize the DirectProtectedEntityManager
 	dpem := server.NewDirectProtectedEntityManagerFromParamMap(configInfo, logger)
 
@@ -161,7 +160,6 @@ func NewSnapshotManagerFromConfig(configInfo server.ConfigInfo, s3RepoParams map
 		logger.Infof("SnapshotManager: Get s3PETM from the params map")
 	}
 
-
 	// Register external PETMs if any
 	if clusterFlavor == utils.TkgGuest {
 		paravirtParams := make(map[string]interface{})
@@ -176,9 +174,6 @@ func NewSnapshotManagerFromConfig(configInfo server.ConfigInfo, s3RepoParams map
 		}
 		dpem.RegisterExternalProtectedEntityTypeManagers([]astrolabe.ProtectedEntityTypeManager{paraVirtPETM})
 	}
-
-
-
 
 	ivdPETM := dpem.GetProtectedEntityTypeManager("ivd")
 	if ivdPETM != nil {
@@ -264,7 +259,7 @@ func (this *SnapshotManager) createSnapshot(peID astrolabe.ProtectedEntityID, ta
 
 /*
 Creates an Upload CR
- */
+*/
 func (this *SnapshotManager) UploadSnapshot(peID astrolabe.ProtectedEntityID, updatedPeID astrolabe.ProtectedEntityID,
 	peSnapID astrolabe.ProtectedEntitySnapshotID, pe astrolabe.ProtectedEntity, ctx context.Context, backupRepositoryName string) (*v1api.Upload, error) {
 	this.Info("Start creating Upload CR")
@@ -484,8 +479,8 @@ func (this *SnapshotManager) deleteSnapshotFromRepo(peID astrolabe.ProtectedEnti
 
 const PollLogInterval = time.Minute
 
-func (this *SnapshotManager) CreateVolumeFromSnapshot(peID astrolabe.ProtectedEntityID) (updatedID astrolabe.ProtectedEntityID, err error) {
-	this.Infof("Start creating Download CR for %s", peID.String())
+func (this *SnapshotManager) CreateVolumeFromSnapshot(sourcePEID astrolabe.ProtectedEntityID, destinationPEID astrolabe.ProtectedEntityID) (updatedID astrolabe.ProtectedEntityID, err error) {
+	this.Infof("Start creating Download CR for %s", sourcePEID.String())
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		this.WithError(err).Errorf("Failed to get k8s inClusterConfig")
@@ -504,12 +499,16 @@ func (this *SnapshotManager) CreateVolumeFromSnapshot(peID astrolabe.ProtectedEn
 	}
 
 	uuid, _ := uuid.NewRandom()
-	downloadRecordName := "download-" + peID.GetSnapshotID().GetID() + "-" + uuid.String()
-	download := builder.ForDownload(veleroNs, downloadRecordName).
-		RestoreTimestamp(time.Now()).NextRetryTimestamp(time.Now()).SnapshotID(peID.String()).Phase(v1api.DownloadPhaseNew).Result()
+	downloadRecordName := "download-" + sourcePEID.GetSnapshotID().GetID() + "-" + uuid.String()
+	downloadBuilder := builder.ForDownload(veleroNs, downloadRecordName).
+		RestoreTimestamp(time.Now()).NextRetryTimestamp(time.Now()).SnapshotID(sourcePEID.String()).Phase(v1api.DownloadPhaseNew)
+	if destinationPEID != (astrolabe.ProtectedEntityID{}) {
+		downloadBuilder = downloadBuilder.ProtectedEntityID(destinationPEID.String())
+	}
+	download := downloadBuilder.Result()
 	_, err = pluginClient.VeleropluginV1().Downloads(veleroNs).Create(download)
 	if err != nil {
-		this.WithError(err).Errorf("CreateVolumeFromSnapshot: Failed to create Download CR for %s", peID.String())
+		this.WithError(err).Errorf("CreateVolumeFromSnapshot: Failed to create Download CR for %s", sourcePEID.String())
 		return
 	}
 
