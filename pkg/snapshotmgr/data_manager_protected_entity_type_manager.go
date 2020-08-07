@@ -39,10 +39,11 @@ func (this DataManagerProtectedEntityTypeManager) GetProtectedEntity(ctx context
 func (this DataManagerProtectedEntityTypeManager) Copy(ctx context.Context, pe astrolabe.ProtectedEntity,
 	params map[string]map[string]interface{}, options astrolabe.CopyCreateOptions) (astrolabe.ProtectedEntity, error) {
 	fmt.Println("Copy called")
+	// TODO - Implement this
 	if this.upload {
 
 	} else {
-		this.snapshotMgr.UploadSnapshot()
+		//this.snapshotMgr.UploadSnapshot()
 	}
 	return nil, nil
 }

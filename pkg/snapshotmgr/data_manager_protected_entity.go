@@ -2,7 +2,6 @@ package snapshotmgr
 
 import (
 	"context"
-	"fmt"
 	"github.com/vmware-tanzu/astrolabe/pkg/astrolabe"
 )
 
@@ -19,7 +18,6 @@ func newDataManagerProtectedEntity(pe astrolabe.ProtectedEntity, dm_petm *DataMa
 }
 
 func (this DataManagerProtectedEntity) Overwrite(ctx context.Context, sourcePE astrolabe.ProtectedEntity, params map[string]map[string]interface{}, overwriteComponents bool) error {
-	fmt.Println("Overwrite called")
-	this.dm_petm.snapshotMgr.CreateVolumeFromSnapshot(sourcePE.GetID(), this.GetID())
-	return nil
+	_, err := this.dm_petm.snapshotMgr.CreateVolumeFromSnapshot(sourcePE.GetID(), this.GetID())
+	return err
 }
