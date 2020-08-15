@@ -160,7 +160,6 @@ func NewBackupDriverController(
 
 	deleteSnapshotInformer := backupdriverInformerFactory.Backupdriver().V1().DeleteSnapshots()
 
-
 	claimQueue := workqueue.NewNamedRateLimitingQueue(
 		rateLimiter, "backup-driver-claim-queue")
 	snapshotQueue := workqueue.NewNamedRateLimitingQueue(
@@ -246,8 +245,9 @@ func NewBackupDriverController(
 
 	cloneFromSnapshotInformer.Informer().AddEventHandlerWithResyncPeriod(
 		cache.ResourceEventHandlerFuncs{
-			AddFunc:    func(obj interface{}) { ctrl.enqueueCloneFromSnapshot(obj) },
-			UpdateFunc: func(oldObj, newObj interface{}) { ctrl.enqueueCloneFromSnapshot(newObj) },
+			AddFunc: func(obj interface{}) { ctrl.enqueueCloneFromSnapshot(obj) },
+			// UpdateFunc is not needed now. When adding it backup, make sure no multiple CloneFromSnapshot CR's created for the same request
+			//UpdateFunc: func(oldObj, newObj interface{}) { ctrl.enqueueCloneFromSnapshot(newObj) },
 			//DeleteFunc: func(obj interface{}) { ctrl.delCloneFromSnapshot(obj) },
 		},
 		resyncPeriod,

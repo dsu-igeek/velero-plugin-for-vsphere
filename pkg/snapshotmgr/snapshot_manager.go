@@ -18,6 +18,7 @@ package snapshotmgr
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strings"
@@ -36,6 +37,7 @@ import (
 	plugin_clientset "github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/generated/clientset/versioned"
 	"github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/paravirt"
 	"github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/utils"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/rest"
@@ -230,14 +232,14 @@ func (this *SnapshotManager) createSnapshot(peID astrolabe.ProtectedEntityID, ta
 		}
 		return true, nil
 	})
-	this.Debugf("Return from the call of astrolabe Snapshot API for PE %s", peID.String())
+	this.Infof("Return from the call of astrolabe Snapshot API for PE %s", peID.String())
 
 	if err != nil {
 		this.WithError(err).Errorf("Failed to Snapshot PE for %s", peID.String())
 		return astrolabe.ProtectedEntityID{}, err
 	}
 
-	this.Debugf("constructing the returned PE snapshot id, %s", peSnapID.GetID())
+	this.Infof("constructing the returned PE snapshot id, %s", peSnapID.GetID())
 	updatedPeID = astrolabe.NewProtectedEntityIDWithSnapshotID(peID.GetPeType(), peID.GetID(), peSnapID)
 
 	this.Infof("Local IVD snapshot is created, %s", updatedPeID.String())
@@ -281,7 +283,14 @@ func (this *SnapshotManager) UploadSnapshot(peID astrolabe.ProtectedEntityID, up
 		return nil, err
 	}
 
-	uploadBuilder := builder.ForUpload(veleroNs, "upload-"+peSnapID.GetID()).BackupTimestamp(time.Now()).NextRetryTimestamp(time.Now()).Phase(v1api.UploadPhaseNew)
+	uploadUUID, err := uuid.NewRandom()
+	if err != nil {
+		this.WithError(err).Errorf("Could not create upload UUID")
+		return nil, err
+	}
+	uploadName := "upload-" + uploadUUID.String()
+	this.Info("Creating Upload CR: %s/%s", veleroNs, uploadName)
+	uploadBuilder := builder.ForUpload(veleroNs, uploadName).BackupTimestamp(time.Now()).NextRetryTimestamp(time.Now()).Phase(v1api.UploadPhaseNew)
 	if peID.GetPeType() == astrolabe.PvcPEType {
 		components, err := pe.GetComponents(ctx)
 		if err != nil {
@@ -291,7 +300,24 @@ func (this *SnapshotManager) UploadSnapshot(peID astrolabe.ProtectedEntityID, up
 		if len(components) != 1 {
 			return nil, errors.New(fmt.Sprintf("Expected 1 component, %s has %d", peID.String(), len(components)))
 		}
-		componentPEID := astrolabe.NewProtectedEntityIDWithSnapshotID(components[0].GetID().GetPeType(), components[0].GetID().GetID(), peSnapID)
+
+		// Extract Snapshot ID
+		componentID64Str := peSnapID.String()
+		componentIDBytes, err := base64.StdEncoding.DecodeString(componentID64Str)
+		if err != nil {
+			errorMsg := fmt.Sprintf("Could not decode snapshot ID encoded string %s", componentID64Str)
+			this.WithError(err).Error(errorMsg)
+			return nil, errors.Wrap(err, errorMsg)
+		}
+
+		componentPEID, err := astrolabe.NewProtectedEntityIDFromString(string(componentIDBytes))
+		if err != nil {
+			errorMsg := fmt.Sprintf("Could not create new PEID from string %s", string(componentIDBytes))
+			this.WithError(err).Error(errorMsg)
+			return nil, errors.Wrap(err, errorMsg)
+		}
+
+		this.Info("UploadSnapshot: componentPEID %s", componentPEID.String())
 		uploadBuilder.SnapshotID(componentPEID.String())
 	} else {
 		uploadBuilder.SnapshotID(updatedPeID.String())
@@ -479,7 +505,7 @@ func (this *SnapshotManager) deleteSnapshotFromRepo(peID astrolabe.ProtectedEnti
 
 const PollLogInterval = time.Minute
 
-func (this *SnapshotManager) CreateVolumeFromSnapshot(sourcePEID astrolabe.ProtectedEntityID, destinationPEID astrolabe.ProtectedEntityID) (updatedID astrolabe.ProtectedEntityID, err error) {
+func (this *SnapshotManager) CreateVolumeFromSnapshot(sourcePEID astrolabe.ProtectedEntityID, destinationPEID astrolabe.ProtectedEntityID, params map[string]map[string]interface{}) (updatedID astrolabe.ProtectedEntityID, err error) {
 	this.Infof("Start creating Download CR for %s", sourcePEID.String())
 	config, err := rest.InClusterConfig()
 	if err != nil {
@@ -499,9 +525,21 @@ func (this *SnapshotManager) CreateVolumeFromSnapshot(sourcePEID astrolabe.Prote
 	}
 
 	uuid, _ := uuid.NewRandom()
+	cloneParams := params["CloneFromSnapshotReference"]
+	cloneFromSnapshotNamespace, ok := cloneParams["CloneFromSnapshotNamespace"].(string)
+	if !ok {
+		cloneFromSnapshotNamespace = "INVALID_CLONE_NAMESPACE"
+	}
+	cloneFromSnapshotName, ok := cloneParams["CloneFromSnapshotName"].(string)
+	if !ok {
+		cloneFromSnapshotName = "INVALID_CLONE_NAME"
+	}
+	cloneRef := fmt.Sprintf("%s/%s", cloneFromSnapshotNamespace, cloneFromSnapshotName)
+	this.Infof("CloneFromSnapshotReference: %s", cloneRef)
 	downloadRecordName := "download-" + sourcePEID.GetSnapshotID().GetID() + "-" + uuid.String()
+	this.Infof("Creating Download CR: %s/%s", veleroNs, downloadRecordName)
 	downloadBuilder := builder.ForDownload(veleroNs, downloadRecordName).
-		RestoreTimestamp(time.Now()).NextRetryTimestamp(time.Now()).SnapshotID(sourcePEID.String()).Phase(v1api.DownloadPhaseNew)
+		RestoreTimestamp(time.Now()).NextRetryTimestamp(time.Now()).SnapshotID(sourcePEID.String()).Phase(v1api.DownloadPhaseNew).CloneFromSnapshotReference(cloneRef)
 	if destinationPEID != (astrolabe.ProtectedEntityID{}) {
 		downloadBuilder = downloadBuilder.ProtectedEntityID(destinationPEID.String())
 	}
@@ -542,31 +580,38 @@ func (this *SnapshotManager) CreateVolumeFromSnapshot(sourcePEID astrolabe.Prote
 		return
 	}
 	updatedID, err = astrolabe.NewProtectedEntityIDFromString(download.Status.VolumeID)
+
+	// TODO(xyang): Watch for Download status and update CloneFromSnapshot status accordingly in Backupdriver
+	cloneFromSnap, err := pluginClient.BackupdriverV1().CloneFromSnapshots(cloneFromSnapshotNamespace).Get(cloneFromSnapshotName, metav1.GetOptions{})
+	if err != nil {
+		this.WithError(err).Errorf("CreateVolumeFromSnapshot: Failed to get CloneFromSnapshot %s/%s", cloneFromSnapshotNamespace, cloneFromSnapshotName)
+		return
+	}
+	clone := cloneFromSnap.DeepCopy()
+	// Since we wait until download is complete here,
+	// download.Status.Phase should be up to date.
+	clone.Status.Phase = backupdriverv1.ClonePhase(download.Status.Phase)
+	clone.Status.Message = download.Status.Message
+	apiGroup := ""
+	clone.Status.ResourceHandle = &v1.TypedLocalObjectReference{
+		APIGroup: &apiGroup,
+		Kind:     "PersistentVolumeClaim",
+		Name:     download.Status.VolumeID,
+	}
+
+	_, err = pluginClient.BackupdriverV1().CloneFromSnapshots(cloneFromSnapshotNamespace).UpdateStatus(clone)
+	if err != nil {
+		this.WithError(err).Errorf("CreateVolumeFromSnapshot: Failed to update status of CloneFromSnapshot %s/%s to %v", cloneFromSnapshotNamespace, cloneFromSnapshotName, clone.Status.Phase)
+		return
+	}
+
 	return
 }
 
 func (this *SnapshotManager) CreateVolumeFromSnapshotWithMetadata(peID astrolabe.ProtectedEntityID, metadata []byte,
-	snapshotIDStr string, backupRepositoryName string) (astrolabe.ProtectedEntityID, error) {
-	this.Infof("CreateVolumeFromSnapshotWithMetadata: Start creating restore for %s", peID.String())
-	// TODO(xyang): Will enable following code when astrolabe.Overwrite is ready
-	//config, err := rest.InClusterConfig()
-	//if err != nil {
-	//	this.WithError(err).Errorf("Failed to get k8s inClusterConfig")
-	//	return
-	//}
-	//pluginClient, err := plugin_clientset.NewForConfig(config)
-	//if err != nil {
-	//	this.WithError(err).Errorf("Failed to get k8s clientset with the given config: %v", config)
-	//	return
-	//}
+	snapshotIDStr string, backupRepositoryName string, cloneFromSnapshotNamespace string, cloneFromSnapshotName string) (astrolabe.ProtectedEntityID, error) {
+	this.Infof("CreateVolumeFromSnapshotWithMetadata: Start creating restore for %s, snapshot ID %s, backupRepositoryName %s", peID.String(), snapshotIDStr, backupRepositoryName)
 
-	//veleroNs, exist := os.LookupEnv("VELERO_NAMESPACE")
-	/*
-	if !exist {
-		this.Errorf("CreateVolumeFromSnapshot: Failed to lookup the env variable for velero namespace")
-		return astrolabe.ProtectedEntityID{}, nil, errors.New(fmt.Sprintf("failed to lookup the env variable for velero namespace"))
-	}
-	*/
 	// Retrieve PVC PE TypeManager
 	peTM := this.Pem.GetProtectedEntityTypeManager(peID.GetPeType())
 	pvcPETM := peTM.(*astrolabe_pvc.PVCProtectedEntityTypeManager)
@@ -575,7 +620,7 @@ func (this *SnapshotManager) CreateVolumeFromSnapshotWithMetadata(peID astrolabe
 	// Translate the BackupRepository to a PETM (usually S3PETM)
 	var snapshotRepo astrolabe.ProtectedEntityTypeManager
 	snapshotRepo = nil
-	if backupRepositoryName != utils.WithoutBackupRepository {
+	if backupRepositoryName != "" && backupRepositoryName != utils.WithoutBackupRepository {
 		config, err := rest.InClusterConfig()
 		if err != nil {
 			this.WithError(err).Errorf("Failed to get k8s inClusterConfig")
@@ -595,14 +640,14 @@ func (this *SnapshotManager) CreateVolumeFromSnapshotWithMetadata(peID astrolabe
 		}
 	}
 
-	this.Infof("Ready to call astrolabe CreateFromMetadata API.")
 	// CreateFromMetadata returns a PVCPE
 	snapshotID, err := astrolabe.NewProtectedEntityIDFromString(snapshotIDStr)
 	if err != nil {
 		this.WithError(err).Errorf("Error creating volume from metadata")
 		return astrolabe.ProtectedEntityID{}, errors.Wrap(err, "Error creating volume from metadata")
 	}
-	pe, err := pvcPETM.CreateFromMetadata(ctx, metadata, snapshotID, snapshotRepo)
+	this.Infof("Ready to call astrolabe CreateFromMetadata API: snapshot ID %s", snapshotID.String())
+	pe, err := pvcPETM.CreateFromMetadata(ctx, metadata, snapshotID, snapshotRepo, cloneFromSnapshotNamespace, cloneFromSnapshotName)
 	if err != nil {
 		this.WithError(err).Errorf("Error creating volume from metadata")
 		return astrolabe.ProtectedEntityID{}, errors.Wrap(err, "Error creating volume from metadata")
@@ -614,53 +659,7 @@ func (this *SnapshotManager) CreateVolumeFromSnapshotWithMetadata(peID astrolabe
 		return astrolabe.ProtectedEntityID{}, err
 	}
 
-	this.Infof("CreateVolumeFromSnapshotWithMetadata: PE returned by CreateFromMetadata PE %+v", pe.GetID().String())
-
-	/*
-	uuid, _ := uuid.NewRandom()
-	downloadRecordName := "download-" + "-" + snapshotID + "-" + uuid.String()
-	download := builder.ForDownload(veleroNs, downloadRecordName).
-		RestoreTimestamp(time.Now()).NextRetryTimestamp(time.Now()).SnapshotID(snapshotID).ProtectedEntityID(pe.GetID().String()).BackupRepositoryName(backupRepositoryName).Phase(v1api.DownloadPhaseNew).Result()
-	this.Infof("Download CR by builder: %+v", download)
-	// TODO(xyang): Will enable following code when astrolabe.Overwrite is ready
-	/*_, err = pluginClient.VeleropluginV1().Downloads(veleroNs).Create(download)
-	if err != nil {
-		this.WithError(err).Errorf("CreateVolumeFromSnapshot: Failed to create Download CR for %s", peID.String())
-		return
-	}
-
-	lastPollLogTime := time.Now()
-	// TODO: Suitable length of timeout
-	err = wait.PollImmediateInfinite(time.Second, func() (bool, error) {
-		infoLog := false
-		if time.Now().Sub(lastPollLogTime) > PollLogInterval {
-			infoLog = true
-			this.Infof("Polling download record %s", downloadRecordName)
-			lastPollLogTime = time.Now()
-		}
-		download, err = pluginClient.VeleropluginV1().Downloads(veleroNs).Get(downloadRecordName, metav1.GetOptions{})
-		if err != nil {
-			this.Errorf("Retrieve download record %s failed with err %v", downloadRecordName, err)
-			return false, errors.Wrapf(err, "Failed to retrieve download record %s", downloadRecordName)
-		}
-		if download.Status.Phase == v1api.DownloadPhaseCompleted {
-			this.Infof("Download record %s completed", downloadRecordName)
-			return true, nil
-		} else if download.Status.Phase == v1api.DownloadPhaseFailed {
-			return false, errors.Errorf("Create download cr failed.")
-		} else {
-			if infoLog {
-				this.Infof("Retrieve phase %s for download record %s", download.Status.Phase, downloadRecordName)
-			}
-			return false, nil
-		}
-	})
-	if err != nil {
-		return
-	}
-	updatedID, err = astrolabe.NewProtectedEntityIDFromString(download.Status.VolumeID)
-	this.Infof("CreateVolumeFromSnapshotWithMetadata completed with updated ID: %s", updatedID)
-	*/
+	this.Infof("CreateVolumeFromSnapshotWithMetadata: PE returned by CreateFromMetadata: %s", pe.GetID().String())
 
 	return pe.GetID(), err
 }
